@@ -84,4 +84,4 @@ app.post('/agent', async (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log('Security Agent 正在 port 3000 運行...'));
+app.listen(1687, () => console.log('Security Agent 正在 port 1687 運行...'));
