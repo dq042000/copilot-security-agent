@@ -7,81 +7,89 @@ dotenv.config();
 
 const app = express();
 app.use(express.json());
+const port = Number(process.env.PORT) || 1687;
+const model = process.env.COPILOT_MODEL || 'gpt-5-mini';
 
+// 1. 初始化 Copilot Client (2026 SDK 規範：需維持單一實例以優化效能)
 const copilotClient = new CopilotClient();
-const gitlabToken = process.env.GITLAB_TOKEN;
-const gitlabHost = process.env.GITLAB_URL ?? 'https://gitlab.com';
+copilotClient.start().then(() => console.log("Copilot SDK 已啟動"));
 
-if (!gitlabToken) {
-  throw new Error('GITLAB_TOKEN is required');
-}
-
-// 初始化 GitLab API
+// 2. 初始化 GitLab
 const gitlab = new Gitlab({
-  host: gitlabHost,
-  token: gitlabToken,
+  host: process.env.GITLAB_URL ?? 'https://gitlab.com',
+  token: process.env.GITLAB_TOKEN!,
 });
 
-app.post('/agent', async (req, res) => {
+/**
+ * 輔助函數：從 Git Remote URL 解析 Project Path
+ * 支援: https://gitlab.com/group/project.git 或 git@gitlab.com:group/project.git
+ */
+function parseProjectPath(remoteUrl: string): string {
   try {
-    // 1. 從請求中提取上下文 (Context)
-    // payload 包含：messages (對話紀錄), context (目前開啟的檔案內容)
-    const { messages, context } = req.body;
-    const currentCode = context.active_file?.content || "無檔案內容";
-    const fileName = context.active_file?.name || "未知檔案";
+    return remoteUrl
+      .replace(/^(https:\/\/|git@).*?[:/]/, '') // 去除前綴
+      .replace(/\.git$/, '');                  // 去除 .git 結尾
+  } catch {
+    return "";
+  }
+}
 
-    // 2. 建立安全專家 Prompt
-    const systemPrompt = `你是一位資安專家。請分析以下程式碼：\n${currentCode}\n
-    如果發現 OWASP 漏洞，請詳細列出。並請用 JSON 格式回傳一個摘要給後台紀錄。`;
+app.post('/scan', async (req, res) => {
+  let session;
+  try {
+    const { code, fileName, remoteUrl, messages } = req.body;
 
-    // 3. 呼叫 Copilot SDK 進行推理
-    const session = await copilotClient.createSession({
-      model: 'gpt-5',
+    // 2. 建立 AI 掃描會話
+    session = await copilotClient.createSession({
+      model,
       onPermissionRequest: approveAll,
-      systemMessage: {
-        mode: 'append',
-        content: systemPrompt,
-      },
     });
-    const prompt = Array.isArray(messages)
-      ? messages
-          .map((message) => {
-            if (typeof message === 'string') return message;
-            if (message?.content) return String(message.content);
-            return '';
-          })
-          .filter(Boolean)
-          .join('\n')
-      : '請分析目前檔案中的潛在安全問題。';
 
-    const response = await session.sendAndWait({ prompt });
-    const resultContent = response?.data?.content ?? '';
+    const systemPrompt = `你是一位資安專家。請分析以下程式碼檔案 ${fileName}：\n\n${code}\n\n
+    要求：
+    1. 識別 OWASP Top 10 漏洞。
+    2. 如果發現漏洞，請在回應開頭標註 [CRITICAL] 標籤。
+    3. 提供修復建議代碼。`;
 
-    // 4. (非同步) 如果發現嚴重問題，回寫 GitLab Issue
-    // 注意：這裡通常會先解析 AI 的回答，若有 [CRITICAL] 標籤才觸發
-    if (resultContent.includes('CRITICAL')) {
-      const projectId = process.env.GITLAB_PROJECT_ID ?? 'PROJECT_ID';
-      await gitlab.Issues.create(
-        projectId,
-        `[Security Alert] ${fileName} 發現潛在漏洞`,
-        {
-          description: `AI 掃描結果摘要：\n${resultContent}`,
-          labels: 'security-bot,automated-scan',
-        }
-      );
+    // 3. 執行分析
+    const userPrompt = messages?.[0]?.content || "請分析此檔案的安全性。";
+    const response = await session.sendAndWait({
+      prompt: `${systemPrompt}\n\n用戶提問：${userPrompt}`
+    });
+
+    const resultContent = response?.data?.content ?? "AI 未回傳結果";
+
+    // 4. 自動回寫 GitLab Issue
+    if (resultContent.includes('[CRITICAL]')) {
+      const projectPath = parseProjectPath(remoteUrl);
+      
+      if (projectPath) {
+        await gitlab.Issues.create(projectPath, `🛡️ AI 弱掃預警: ${fileName}`, {
+          description: `## 漏洞分析報告\n\n${resultContent}\n\n---\n*來源: 內部 AI 安全助理*`,
+          labels: 'security,ai-detected',
+        });
+        console.log(`已在 GitLab 專案 ${projectPath} 建立 Issue`);
+      }
     }
 
-    await session.destroy();
-
-    // 5. 將結果回傳給 VS Code Chat
-    return res.json({
+    // 5. 回傳給 VS Code
+    res.json({
       content: resultContent,
+      status: 'success'
     });
 
-  } catch (error) {
-    console.error("Agent Error:", error);
-    res.status(500).send("Internal Server Error");
+  } catch (error: any) {
+    console.error("Scan Error:", error);
+    res.status(500).json({ error: error.message || "Internal Server Error" });
+  } finally {
+    if (session) await session.destroy();
   }
 });
 
-app.listen(1687, () => console.log('Security Agent 正在 port 1687 運行...'));
+// 優雅關閉
+process.on('SIGINT', async () => {
+  await copilotClient.stop();
+  process.exit(0);
+});
+
+app.listen(port, () => console.log(`🛡️ Security Agent 正在 port ${port} 運行...`));
