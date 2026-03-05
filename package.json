@@ -1,0 +1,32 @@
+{
+  "name": "copilot-security-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start:bg": "pm2 start dist/index.js --name copilot-bot",
+    "start:stop": "pm2 stop copilot-bot",
+    "start:restart": "pm2 restart copilot-bot",
+    "start:logs": "pm2 logs copilot-bot",
+    "start:remove": "pm2 delete copilot-bot"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@gitbeaker/rest": "^43.8.0",
+    "@github/copilot-sdk": "^0.1.30",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.3.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
