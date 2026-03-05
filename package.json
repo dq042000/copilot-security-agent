@@ -7,11 +7,11 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start:bg": "pm2 start dist/index.js --name copilot-bot",
-    "start:stop": "pm2 stop copilot-bot",
-    "start:restart": "pm2 restart copilot-bot",
-    "start:logs": "pm2 logs copilot-bot",
-    "start:remove": "pm2 delete copilot-bot"
+    "start:bg": "pm2 start dist/index.js --name copilot-security-agent",
+    "start:stop": "pm2 stop copilot-security-agent",
+    "start:restart": "pm2 restart copilot-security-agent",
+    "start:logs": "pm2 logs copilot-security-agent",
+    "start:remove": "pm2 delete copilot-security-agent"
   },
   "keywords": [],
   "author": "",
