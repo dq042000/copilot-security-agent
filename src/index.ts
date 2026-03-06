@@ -34,48 +34,141 @@ function parseProjectPath(remoteUrl: string): string {
   }
 }
 
+interface ScanFinding {
+  line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  severity?: string;
+  title?: string;
+  description?: string;
+  suggestion?: string;
+}
+
+/**
+ * 解析 AI 回應中的 JSON findings 陣列。
+ * AI 被要求回傳 ```json ... ``` 包裹的 JSON，此函數負責提取並驗證。
+ */
+function parseFindings(content: string): ScanFinding[] {
+  const jsonMatch = content.match(/```json\s*([\s\S]*?)```/);
+  if (!jsonMatch) return [];
+
+  try {
+    const parsed = JSON.parse(jsonMatch[1]!);
+    const arr = Array.isArray(parsed) ? parsed : parsed?.findings;
+    if (!Array.isArray(arr)) return [];
+
+    return arr.map((f: Record<string, unknown>): ScanFinding => {
+      const finding: ScanFinding = {};
+      if (typeof f.line === 'number') finding.line = f.line;
+      if (typeof f.column === 'number') finding.column = f.column;
+      if (typeof f.endLine === 'number') finding.endLine = f.endLine;
+      if (typeof f.endColumn === 'number') finding.endColumn = f.endColumn;
+      if (typeof f.severity === 'string') finding.severity = f.severity;
+      if (typeof f.title === 'string') finding.title = f.title;
+      if (typeof f.description === 'string') finding.description = f.description;
+      if (typeof f.suggestion === 'string') finding.suggestion = f.suggestion;
+      return finding;
+    });
+  } catch {
+    return [];
+  }
+}
+
 app.post('/scan', async (req, res) => {
   let session;
   try {
-    const { code, fileName, remoteUrl, messages } = req.body;
+    const { code, fileName, remoteUrl, user } = req.body;
 
-    // 2. 建立 AI 掃描會話
+    // 基本請求驗證
+    if (!code || typeof code !== 'string' || !code.trim()) {
+      res.status(400).json({ error: '缺少必要欄位: code' });
+      return;
+    }
+    if (!fileName || typeof fileName !== 'string') {
+      res.status(400).json({ error: '缺少必要欄位: fileName' });
+      return;
+    }
+
+    console.log(`[scan] file=${fileName}, user=${user ?? 'unknown'}, code_length=${code.length}`);
+
+    // 建立 AI 掃描會話
     session = await copilotClient.createSession({
       model,
       onPermissionRequest: approveAll,
     });
 
-    const systemPrompt = `你是一位資安專家。請分析以下程式碼檔案 ${fileName}：\n\n${code}\n\n
-    要求：
-    1. 識別 OWASP Top 10 漏洞。
-    2. 如果發現漏洞，請在回應開頭標註 [CRITICAL] 標籤。
-    3. 提供修復建議代碼。`;
+    const systemPrompt = `你是一位資安專家。請分析以下程式碼檔案的安全性。
 
-    // 3. 執行分析
-    const userPrompt = messages?.[0]?.content || "請分析此檔案的安全性。";
+檔案名稱：${fileName}
+
+程式碼：
+${code}
+
+要求：
+1. 識別 OWASP Top 10 漏洞（包含 Injection、Broken Access Control、Cryptographic Failures、XSS 等）。
+2. 對每個發現的漏洞，提供精確的行號位置、嚴重等級、說明與修復建議。
+3. 嚴重等級請用：critical、high、medium、low、info。
+
+你 **必須** 用以下 JSON 格式回傳所有發現，用 \`\`\`json ... \`\`\` 包裹：
+
+\`\`\`json
+[
+  {
+    "line": 10,
+    "endLine": 10,
+    "column": 1,
+    "endColumn": 50,
+    "severity": "high",
+    "title": "SQL Injection",
+    "description": "直接拼接使用者輸入至 SQL 查詢，可能導致 SQL 注入攻擊。",
+    "suggestion": "使用參數化查詢或 ORM 來避免 SQL 注入。"
+  }
+]
+\`\`\`
+
+如果沒有發現任何漏洞，回傳空陣列：\`\`\`json\n[]\n\`\`\``;
+
+    // 執行分析
     const response = await session.sendAndWait({
-      prompt: `${systemPrompt}\n\n用戶提問：${userPrompt}`
+      prompt: `${systemPrompt}\n\n請分析此檔案的安全性。`
     });
 
-    const resultContent = response?.data?.content ?? "AI 未回傳結果";
+    const resultContent = response?.data?.content ?? "";
+    const findings = parseFindings(resultContent);
 
-    // 4. 自動回寫 GitLab Issue
-    if (resultContent.includes('[CRITICAL]')) {
+    console.log(`[scan] file=${fileName}, findings=${findings.length}`);
+
+    // 判斷是否有 critical/high 等級的弱點需建立 GitLab Issue
+    let issueId: number | undefined;
+    const hasCritical = findings.some(
+      f => f.severity === 'critical' || f.severity === 'high'
+    );
+
+    if (hasCritical && remoteUrl) {
       const projectPath = parseProjectPath(remoteUrl);
-      
+
       if (projectPath) {
-        await gitlab.Issues.create(projectPath, `🛡️ AI 弱掃預警: ${fileName}`, {
-          description: `## 漏洞分析報告\n\n${resultContent}\n\n---\n*來源: 內部 AI 安全助理*`,
+        const issueDescription = findings
+          .map(f => `### ${f.severity?.toUpperCase()}: ${f.title ?? '未命名'}\n` +
+            `- **位置**: 第 ${f.line ?? '?'} 行\n` +
+            `- **說明**: ${f.description ?? '無'}\n` +
+            `- **建議**: ${f.suggestion ?? '無'}\n`)
+          .join('\n');
+
+        const issue = await gitlab.Issues.create(projectPath, `🛡️ AI 弱掃預警: ${fileName}`, {
+          description: `## 漏洞分析報告\n\n${issueDescription}\n\n---\n*來源: 內部 AI 安全助理*`,
           labels: 'security,ai-detected',
         });
-        console.log(`已在 GitLab 專案 ${projectPath} 建立 Issue`);
+        issueId = (issue as { iid?: number }).iid;
+        console.log(`[scan] GitLab Issue #${issueId} created for ${projectPath}`);
       }
     }
 
-    // 5. 回傳給 VS Code
+    // 回傳符合 Scanner ScanResponse 介面的結構
     res.json({
-      content: resultContent,
-      status: 'success'
+      findings,
+      ...(issueId !== undefined && { issueId }),
     });
 
   } catch (error: any) {
