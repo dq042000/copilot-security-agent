@@ -61,6 +61,7 @@ interface ScanFinding {
   title?: string;
   description?: string;
   suggestion?: string;
+  suggestionCode?: string;
 }
 
 interface ScanRequest {
@@ -99,6 +100,14 @@ const severityTraditionalMap: Record<CanonicalSeverity, string> = {
   info: '資訊',
 };
 
+const severityIconMap: Record<CanonicalSeverity, string> = {
+  critical: '🔴',
+  high: '🟠',
+  medium: '🟡',
+  low: '🟢',
+  info: '🔵',
+};
+
 /**
  * 解析 AI 回應中的 JSON findings 陣列。
  * AI 被要求回傳 ```json ... ``` 包裹的 JSON，此函數負責提取並驗證。
@@ -128,6 +137,15 @@ function parseFindings(content: string): ScanFinding[] {
       if (typeof f.title === 'string') finding.title = f.title;
       if (typeof f.description === 'string') finding.description = f.description;
       if (typeof f.suggestion === 'string') finding.suggestion = f.suggestion;
+      const rawSuggestionCode = typeof f.suggestionCode === 'string'
+        ? f.suggestionCode
+        : typeof f.fixCode === 'string'
+          ? f.fixCode
+          : typeof f.codeExample === 'string'
+            ? f.codeExample
+            : undefined;
+      const suggestionCode = rawSuggestionCode?.trim();
+      if (suggestionCode) finding.suggestionCode = suggestionCode;
       return finding;
     });
   } catch {
@@ -156,6 +174,11 @@ function toTraditionalSeverity(severity?: string): string | undefined {
 
   const trimmed = severity?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function getSeverityIcon(severity?: string): string {
+  const normalized = normalizeSeverity(severity);
+  return normalized ? severityIconMap[normalized] : '⚪';
 }
 
 function buildScanKey({ code, fileName, remoteUrl, user }: ScanRequest): string {
@@ -273,7 +296,7 @@ ${code}
 
 要求：
 1. 識別 OWASP Top 10 漏洞（包含 Injection、Broken Access Control、Cryptographic Failures、XSS 等）。
-2. 對每個發現的漏洞，提供精確的行號位置、嚴重等級、說明與修復建議。
+2. 對每個發現的漏洞，提供精確的行號位置、嚴重等級、說明與修復建議；若可提供修補範例，請加上 suggestionCode 欄位。
 3. 嚴重等級請用繁體中文：嚴重、高、中、低、資訊（由高到低）。
 
 你 **必須** 用以下 JSON 格式回傳所有發現，用 \`\`\`json ... \`\`\` 包裹：
@@ -288,7 +311,8 @@ ${code}
     "severity": "高",
     "title": "SQL Injection",
     "description": "直接拼接使用者輸入至 SQL 查詢，可能導致 SQL 注入攻擊。",
-    "suggestion": "使用參數化查詢或 ORM 來避免 SQL 注入。"
+    "suggestion": "使用參數化查詢或 ORM 來避免 SQL 注入。",
+    "suggestionCode": "$stmt = $pdo->prepare('SELECT * FROM users WHERE id = :id');"
   }
 ]
 \`\`\`
@@ -330,16 +354,23 @@ ${code}
             ? `- **程式碼片段（第 ${codeContext.startLine} ~ ${codeContext.endLine} 行）**:\n\`\`\`\n${codeContext.snippet}\n\`\`\`\n`
             : '';
           const severityLabel = toTraditionalSeverity(f.severity) ?? '未知';
+          const severityIcon = getSeverityIcon(f.severity);
+          const suggestionCode = f.suggestionCode?.trim();
+          const suggestionCodeSection = suggestionCode
+            ? `- **建議程式碼**:\n\`\`\`\n${suggestionCode}\n\`\`\`\n`
+            : '';
 
-          return `### ${severityLabel}: ${f.title ?? '未命名'}\n` +
+          return `### ${severityIcon} ${severityLabel}: ${f.title ?? '未命名'}\n` +
             `- **位置**: 第 ${f.line ?? '?'} 行\n` +
             `- **說明**: ${f.description ?? '無'}\n` +
             `- **建議**: ${f.suggestion ?? '無'}\n` +
+            suggestionCodeSection +
             codeContextSection;
         })
         .join('\n');
 
-      const issue = await gitlab.Issues.create(projectPath, `🛡️ AI 弱掃預警: ${fileName}`, {
+      const topSeverityIcon = getSeverityIcon(sortedFindings[0]?.severity);
+      const issue = await gitlab.Issues.create(projectPath, `${topSeverityIcon} 🛡️ AI 弱掃預警: ${fileName}`, {
         description: `## 漏洞分析報告\n\n${issueDescription}\n\n---\n*來源: 內部 AI 安全助理*`,
         labels: 'security,ai-detected',
       });
