@@ -9,6 +9,11 @@ const app = express();
 app.use(express.json());
 const port = Number(process.env.PORT) || 1687;
 const model = process.env.COPILOT_MODEL || 'gpt-5-mini';
+const defaultScanTimeoutMs = 180000;
+const configuredScanTimeoutMs = Number(process.env.COPILOT_SCAN_TIMEOUT_MS);
+const scanTimeoutMs = Number.isFinite(configuredScanTimeoutMs) && configuredScanTimeoutMs > 0
+  ? configuredScanTimeoutMs
+  : defaultScanTimeoutMs;
 
 // 1. 初始化 Copilot Client (2026 SDK 規範：需維持單一實例以優化效能)
 const copilotClient = new CopilotClient();
@@ -90,7 +95,7 @@ app.post('/scan', async (req, res) => {
       return;
     }
 
-    console.log(`[scan] file=${fileName}, user=${user ?? 'unknown'}, code_length=${code.length}`);
+    console.log(`[scan] file=${fileName}, user=${user ?? 'unknown'}, code_length=${code.length}, timeout_ms=${scanTimeoutMs}`);
 
     // 建立 AI 掃描會話
     session = await copilotClient.createSession({
@@ -132,7 +137,7 @@ ${code}
     // 執行分析
     const response = await session.sendAndWait({
       prompt: `${systemPrompt}\n\n請分析此檔案的安全性。`
-    });
+    }, scanTimeoutMs);
 
     const resultContent = response?.data?.content ?? "";
     const findings = parseFindings(resultContent);
